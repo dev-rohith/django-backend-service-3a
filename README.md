@@ -1,6 +1,6 @@
-# Assignment 3A – AI Backend (Django + LLM)
+# Django GenAI Backend — Assignments 3A & 3B
 
-This extends the Assignment 2 Django backend with four new AI-powered endpoints: document ingestion with chunking, a FAISS vector store, RAG-based Q&A, and a general LLM chat endpoint. Everything builds on the same stack and patterns from Assignment 2.
+A Django REST API extended with AI capabilities: document ingestion, a FAISS vector store, RAG-based Q&A, a LangGraph conversational agent, and a Streamlit chat UI. Builds directly on the Assignment 2 codebase.
 
 ## Tech Stack
 
@@ -11,38 +11,47 @@ This extends the Assignment 2 Django backend with four new AI-powered endpoints:
 | Embeddings | `sentence-transformers` — `all-MiniLM-L6-v2` (local, no extra API key) |
 | Vector Store | FAISS (`faiss-cpu`) |
 | Text Splitting | LangChain `RecursiveCharacterTextSplitter` |
+| Agent | LangGraph `StateGraph` with conditional routing |
+| External Tool | Open-Meteo weather API (free, no key required) |
+| UI | Streamlit |
 | Auth | Token authentication (same as Assignment 2) |
 | Package manager | `uv` |
 
 ## Project Layout
 
 ```
-assignment-3a-backend/
-├── config/          Django settings, URLs, wsgi
-├── core/            Shared pagination and constants
-├── accounts/        Register, login, logout
-├── documents/       Document upload and keyword search (Assignment 2)
-├── ai/              All AI endpoints (new)
-│   ├── models.py    AIQueryHistory
-│   ├── views.py     Four endpoint views
-│   ├── routes.py
+django-backend-service-3a/
+├── config/           Django settings, URLs, wsgi
+├── core/             Shared pagination and constants
+├── accounts/         Register, login, logout
+├── documents/        Document upload and keyword search (Assignment 2)
+├── ai/               Assignment 3A — direct LLM endpoints
+│   ├── models.py     AIQueryHistory
+│   ├── views.py      ask-ai, ingest-doc, rag-query, query-history
 │   └── services/
 │       ├── llm_service.py   Prompt templates + Claude API calls
-│       ├── vector_store.py  FAISS wrapper
+│       ├── vector_store.py  FAISS wrapper (thread-safe singleton)
 │       └── chunker.py       Text splitter
-└── faiss_index/     Auto-created at runtime (index.faiss + metadata.json)
+├── agent/            Assignment 3B — conversational agent
+│   ├── models.py     ChatSession, ChatMessage
+│   ├── views.py      file upload, chat, history
+│   └── services/
+│       ├── agent.py  LangGraph graph — classify → [rag|weather|general] → respond
+│       └── tools.py  RAG search + Open-Meteo weather
+├── streamlit_app/    Streamlit chat UI
+│   └── app.py
+└── faiss_index/      Auto-created at runtime (index.faiss + metadata.json)
 ```
 
 ## Setup
 
-Make sure you have Python 3.12+ and [uv](https://docs.astral.sh/uv/) installed.
+Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-cd assignment-3a-backend
 cp .env.example .env
 ```
 
-Open `.env` and fill in at minimum:
+Fill in `.env`:
 
 ```
 SECRET_KEY=your-secret-key
@@ -50,7 +59,7 @@ DEBUG=True
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-Then install and run:
+Install and run:
 
 ```bash
 uv sync
@@ -58,7 +67,16 @@ uv run python manage.py migrate
 uv run python manage.py runserver
 ```
 
-The API is at `http://127.0.0.1:8000/api/` and the Swagger docs are at `http://127.0.0.1:8000/api/docs/`.
+The API is at `http://127.0.0.1:8000/api/` and Swagger docs at `http://127.0.0.1:8000/api/docs/`.
+
+**To run the Streamlit UI** (separate terminal):
+
+```bash
+pip install streamlit requests
+streamlit run streamlit_app/app.py
+```
+
+Open `http://localhost:8501`, log in with a registered account, upload a document, and start chatting.
 
 ## Environment Variables
 
@@ -66,42 +84,62 @@ The API is at `http://127.0.0.1:8000/api/` and the Swagger docs are at `http://1
 |---|---|---|
 | `SECRET_KEY` | Yes | Django secret key |
 | `DEBUG` | No | Set to `True` for local development |
-| `DATABASE_URL` | No | Defaults to SQLite. Use `postgres://` in production |
-| `ANTHROPIC_API_KEY` | Yes | Your Anthropic API key |
+| `DATABASE_URL` | No | Defaults to SQLite |
+| `ANTHROPIC_API_KEY` | Yes | Anthropic API key |
+| `BACKEND_URL` | No | Streamlit target (defaults to `http://localhost:8000`) |
 
 ## Chunking Strategy
 
-Documents are split using `RecursiveCharacterTextSplitter` from LangChain with these settings:
-
-- **Chunk size:** 500 characters (~125 tokens). Small enough to keep each chunk topically focused, which improves retrieval precision.
-- **Chunk overlap:** 50 characters. Ensures sentences that fall across a boundary still appear in at least one chunk with enough context to be useful.
-
-The splitter tries to break on paragraph boundaries first, then newlines, then spaces, so it respects natural document structure wherever possible.
+Documents are split with `RecursiveCharacterTextSplitter` (chunk size 500 chars, overlap 50 chars). The splitter respects paragraph and sentence boundaries, so each chunk tends to be topically cohesive rather than cut mid-thought. Overlap ensures context is preserved across boundaries.
 
 ## Vector Store
 
-Embeddings are generated locally using `sentence-transformers` with the `all-MiniLM-L6-v2` model (384 dimensions). No external API call is needed for embedding — this keeps ingestion fast and avoids the cost of a separate embeddings API.
+Embeddings are generated locally with `sentence-transformers` (`all-MiniLM-L6-v2`, 384 dimensions) — no embeddings API or extra cost. The FAISS index uses `IndexIDMap` wrapping `IndexFlatL2` so individual chunks can be deleted by their database primary key. Re-ingesting a document is idempotent: old vectors are removed before new ones are added.
 
-The FAISS index uses `IndexIDMap` wrapping `IndexFlatL2`, which allows chunks to be deleted by their database primary key. This makes re-ingesting a document clean and idempotent — old vectors are removed before new ones are added.
+The index persists to `faiss_index/index.faiss` alongside a JSON sidecar that maps vector IDs to document IDs and chunk text. Both are loaded on startup.
 
-The index is saved to `faiss_index/index.faiss` and a JSON sidecar (`faiss_index/metadata.json`) keeps the mapping from vector ID to document ID and chunk text. Both are reloaded on startup. The `faiss_index/` directory is created automatically and can be left out of version control — the index can always be rebuilt by re-ingesting documents.
+## LangGraph Agent (3B)
+
+Each chat message flows through a three-node decision graph:
+
+```
+classify_intent
+      ↓
+  [rag | weather | general]  ← conditional branch based on intent
+      ↓
+generate_response
+```
+
+- **rag** — searches the FAISS vector store and includes source chunks in the response
+- **weather** — calls the Open-Meteo geocoding + forecast API to return live temperature data
+- **general** — answers directly using the conversation history as context
+
+Session memory is maintained per `session_key`: all prior turns are loaded from the database and passed to the agent on each request.
 
 ## API Endpoints
 
-These are the new endpoints added in this assignment. All require `Authorization: Token <token>`.
+All endpoints require `Authorization: Token <token>`.
+
+**Assignment 3A**
 
 | Method | Path | Description |
 |---|---|---|
-| POST | `/api/ask-ai` | General LLM Q&A using a prompt template |
-| POST | `/api/ingest-doc` | Chunk a document and store its embeddings |
-| POST | `/api/rag-query` | Answer a question using retrieved document chunks |
-| GET | `/api/query-history` | Paginated history of AI queries for the current user |
+| POST | `/api/ask-ai` | General LLM Q&A |
+| POST | `/api/ingest-doc` | Chunk and embed a document by ID |
+| POST | `/api/rag-query` | Answer using retrieved document chunks |
+| GET | `/api/query-history` | Paginated query history (page_size=10) |
 
-The existing Assignment 2 endpoints (`/api/documents`, `/api/query`, etc.) are unchanged.
+**Assignment 3B**
+
+| Method | Path | Description |
+|---|---|---|
+| POST | `/api/agent/upload/` | Upload PDF or TXT, auto-ingest into FAISS |
+| POST | `/api/agent/chat/` | Chat with the LangGraph agent (session memory) |
+| GET | `/api/agent/history/<session_key>/` | Last 100 messages for a session |
 
 ## Usage Examples
 
-**Register and log in to get a token:**
+**Register and get a token:**
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/auth/register \
@@ -113,67 +151,56 @@ curl -X POST http://127.0.0.1:8000/api/auth/login \
   -d '{"username": "alice", "password": "strongpass123"}'
 ```
 
-**Upload a document, then ingest it:**
+**Upload and auto-ingest a document:**
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/documents \
+curl -X POST http://127.0.0.1:8000/api/agent/upload/ \
   -H "Authorization: Token <your-token>" \
-  -F "title=My Doc" \
-  -F "file=@notes.txt"
-
-curl -X POST http://127.0.0.1:8000/api/ingest-doc \
-  -H "Authorization: Token <your-token>" \
-  -H "Content-Type: application/json" \
-  -d '{"document_id": 1}'
+  -F "file=@report.pdf"
 ```
 
 Response:
 ```json
-{"status": "success", "chunk_count": 12}
+{"status": "success", "document_id": 3, "chunk_count": 18}
 ```
 
-**Ask a RAG question:**
+**Chat with the agent:**
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/rag-query \
+curl -X POST http://127.0.0.1:8000/api/agent/chat/ \
   -H "Authorization: Token <your-token>" \
   -H "Content-Type: application/json" \
-  -d '{"query": "What does the document say about authentication?"}'
+  -d '{"message": "What does the report say about revenue?", "session_id": null}'
 ```
 
 Response:
 ```json
 {
-  "answer": "According to the document, authentication uses token-based auth...",
-  "source_chunks": [
-    {"document_id": "1", "chunk_text": "Authentication is implemented using..."},
-    {"document_id": "1", "chunk_text": "Tokens are issued at login and must be..."}
+  "session_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "response": "According to the report, revenue increased by 12% year-over-year...",
+  "sources": [
+    {"document_id": "3", "chunk_text": "Revenue grew from $4.2M to $4.7M in FY2024..."}
   ]
 }
 ```
 
-**Ask a general question (no documents needed):**
+**Ask a weather question:**
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/ask-ai \
+curl -X POST http://127.0.0.1:8000/api/agent/chat/ \
   -H "Authorization: Token <your-token>" \
   -H "Content-Type: application/json" \
-  -d '{"prompt": "What is retrieval-augmented generation?"}'
+  -d '{"message": "What is the weather in Tokyo?", "session_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6"}'
 ```
 
-Response:
-```json
-{"response": "Retrieval-Augmented Generation (RAG) is a technique that..."}
-```
-
-**View query history:**
+**3A — RAG query (uses document ID from ingest-doc):**
 
 ```bash
-curl http://127.0.0.1:8000/api/query-history \
-  -H "Authorization: Token <your-token>"
+curl -X POST http://127.0.0.1:8000/api/rag-query \
+  -H "Authorization: Token <your-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "What is the authentication flow?"}'
 ```
-
-Returns a paginated list (`page_size=10`). Add `?page=2` to get the next page.
 
 ## Running Tests
 

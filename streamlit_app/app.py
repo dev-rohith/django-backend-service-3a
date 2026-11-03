@@ -1,9 +1,10 @@
+import os
 import uuid
 
 import requests
 import streamlit as st
 
-BACKEND = "http://localhost:8000"
+BACKEND = os.getenv("BACKEND_URL", "http://localhost:8000")
 
 
 def _headers() -> dict:
@@ -112,7 +113,7 @@ st.caption(
     "current weather in any city, or general topics."
 )
 
-for msg in st.session_state.get("messages", []):
+for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
         sources = msg.get("sources") or []

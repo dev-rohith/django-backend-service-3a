@@ -1,6 +1,7 @@
 import logging
 import uuid
 
+import pypdf
 from django.db import transaction
 from rest_framework import status
 from rest_framework.parsers import MultiPartParser
@@ -12,7 +13,7 @@ from ai.services.vector_store import store
 from documents.models import Document, DocumentChunk
 
 from .models import ChatMessage, ChatSession
-from .serializers import ChatRequestSerializer, ChatSessionSerializer
+from .serializers import ChatMessageSerializer, ChatRequestSerializer
 from .services.agent import agent
 
 logger = logging.getLogger(__name__)
@@ -20,7 +21,6 @@ logger = logging.getLogger(__name__)
 
 def _extract_text(file) -> str:
     if file.name.lower().endswith(".pdf"):
-        import pypdf
         reader = pypdf.PdfReader(file)
         return "\n".join(page.extract_text() or "" for page in reader.pages)
     return file.read().decode("utf-8", errors="replace")
@@ -114,4 +114,9 @@ class ChatHistoryView(APIView):
             session = ChatSession.objects.get(user=request.user, session_key=session_key)
         except ChatSession.DoesNotExist:
             return Response({"error": "Session not found."}, status=status.HTTP_404_NOT_FOUND)
-        return Response(ChatSessionSerializer(session).data)
+        messages = session.messages.order_by("created_at")[:100]
+        return Response({
+            "session_key": str(session.session_key),
+            "created_at": session.created_at,
+            "messages": ChatMessageSerializer(messages, many=True).data,
+        })
