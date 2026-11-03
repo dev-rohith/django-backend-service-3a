@@ -1,0 +1,16 @@
+# Django
+*.pyc
+__pycache__/
+db.sqlite3
+media/
+.env
+
+# FAISS vector store (rebuilt by re-ingesting docs)
+faiss_index/
+
+# Python
+.venv/
+*.egg-info/
+
+# macOS
+.DS_Store

@@ -1,0 +1,4 @@
+LLM_MODEL = "claude-opus-5-5"
+MAX_TOKENS = 16000
+EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+TOP_K = 3
